@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yammerey Social Media</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.4.0/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/babel-standalone@7.18.9/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // GitHub API configuration
+    const GITHUB_TOKEN = "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"; // Replace with your PAT (repo scope)
+    const REPOS = {
+      users: { primary: "yamerey/Users", secondary: "yamerey/Users-2" },
+      vids: { primary: "yamerey/Vids", secondary: "yamerey/Vids-2" },
+    };
+    const axiosConfig = {
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    };
+
+    // FFmpeg instance
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ffmpeg = createFFmpeg({ log: false });
+
+    const App = () => {
+      const [username, setUsername] = useState("");
+      const [videoFile, setVideoFile] = useState(null);
+      const [users, setUsers] = useState([]);
+      const [videos, setVideos] = useState([]);
+      const [error, setError] = useState("");
+      const [loading, setLoading] = useState(false);
+
+      // Load FFmpeg and initial data
+      useEffect(() => {
+        const loadFFmpeg = async () => {
+          if (!ffmpeg.isLoaded()) await ffmpeg.load();
+        };
+        loadFFmpeg();
+        fetchUsers();
+        fetchVideos();
+      }, []);
+
+      // Get repo size to determine primary/secondary
+      const getRepoSize = async (repo) => {
+        try {
+          const response = await axios.get(`https://api.github.com/repos/${repo}`, axiosConfig);
+          return response.data.size; // Size in KB
+        } catch {
+          return 0;
+        }
+      };
+
+      // Fetch users from both repos
+      const fetchUsers = async () => {
+        setLoading(true);
+        try {
+          const repos = [REPOS.users.primary, REPOS.users.secondary];
+          let allUsers = [];
+          for (const repo of repos) {
+            const response = await axios.get(`https://api.github.com/repos/${repo}/contents`, axiosConfig);
+            const userFiles = response.data;
+            const userPromises = userFiles
+              .filter(file => file.name.endsWith('.json'))
+              .map(async (file) => {
+                const content = await axios.get(file.download_url);
+                return JSON.parse(atob(content.data.content)).username;
+              });
+            const users = await Promise.all(userPromises);
+            allUsers = [...allUsers, ...users];
+          }
+          setUsers(allUsers);
+          setError("");
+        } catch (err) {
+          setError("Failed to fetch users. Try again.");
+        }
+        setLoading(false);
+      };
+
+      // Fetch videos from both repos
+      const fetchVideos = async () => {
+        setLoading(true);
+        try {
+          const repos = [REPOS.vids.primary, REPOS.vids.secondary];
+          let allVideos = [];
+          for (const repo of repos) {
+            const response = await axios.get(`https://api.github.com/repos/${repo}/contents`, axiosConfig);
+            const videoFiles = response.data.filter(file => file.name.endsWith('.mp4'));
+            allVideos = [...allVideos, ...videoFiles.map(file => ({ name: file.name, url: file.download_url }))];
+          }
+          setVideos(allVideos);
+          setError("");
+        } catch (err) {
+          setError("Failed to fetch videos. Try again.");
+        }
+        setLoading(false);
+      };
+
+      // Register user
+      const handleRegister = async () => {
+        if (!username.trim()) {
+          setError("Username is required.");
+          return;
+        }
+        setLoading(true);
+        try {
+          const repo = (await getRepoSize(REPOS.users.primary)) < 900000 ? REPOS.users.primary : REPOS.users.secondary;
+          const userData = { username, createdAt: new Date().toISOString() };
+          const content = btoa(JSON.stringify(userData));
+          await axios.put(
+            `https://api.github.com/repos/${repo}/contents/${username}.json`,
+            { message: `Add user ${username}`, content },
+            axiosConfig
+          );
+          setUsers([...users, username]);
+          setUsername("");
+          setError("");
+        } catch (err) {
+          setError("Registration failed. Username may exist or repo is full.");
+        }
+        setLoading(false);
+      };
+
+      // Upload and compress video
+      const handleVideoUpload = async () => {
+        if (!videoFile) {
+          setError("Please select a video.");
+          return;
+        }
+        if (videoFile.size > 100 * 1024 * 1024) {
+          setError("Video too large; max 100MB before compression.");
+          return;
+        }
+        setLoading(true);
+        try {
+          await ffmpeg.load();
+          ffmpeg.FS("writeFile", "input.mp4", await fetchFile(videoFile));
+          await ffmpeg.run(
+            "-i", "input.mp4",
+            "-vf", "scale=640:360",
+            "-t", "20",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-b:v", "800k",
+            "output.mp4"
+          );
+          const compressedVideo = ffmpeg.FS("readFile", "output.mp4");
+          const videoBlob = new Blob([compressedVideo.buffer], { type: "video/mp4" });
+          const videoBase64 = await blobToBase64(videoBlob);
+          const videoName = `${Date.now()}-${videoFile.name}`;
+          const repo = (await getRepoSize(REPOS.vids.primary)) < 900000 ? REPOS.vids.primary : REPOS.vids.secondary;
+          await axios.put(
+            `https://api.github.com/repos/${repo}/contents/${videoName}`,
+            { message: `Upload video ${videoName}`, content: videoBase64.split(",")[1] },
+            axiosConfig
+          );
+          setVideos([{ name: videoName, url: URL.createObjectURL(videoBlob) }, ...videos]);
+          setVideoFile(null);
+          setError("");
+        } catch (err) {
+          setError("Video upload failed. Check format or try again.");
+        }
+        setLoading(false);
+      };
+
+      // Convert blob to base64
+      const blobToBase64 = (blob) =>
+        new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(blob);
+          reader.onloadend = () => resolve(reader.result);
+        });
+
+      return (
+        <div className="min-h-screen bg-gray-100 py-8 px-4">
+          <div className="max-w-4xl mx-auto">
+            <h1 className="text-4xl font-bold text-center mb-8 text-blue-600">Yammerey Social Media</h1>
+            <p className="text-center text-gray-600 mb-6">Create an account, upload short videos (max 20s, compressed to 360p), and view content. Videos auto-delete after 2 days, accounts after 1 year.</p>
+            {error && <p className="bg-red-200 text-red-800 p-3 rounded mb-4 text-center">{error}</p>}
+            {loading && <p className="text-center text-yellow-600 mb-4">Loading...</p>}
+
+            {/* Register User */}
+            <section className="bg-white p-6 rounded-lg shadow-md mb-6">
+              <h2 className="text-2xl font-semibold mb-4">Create Account</h2>
+              <p className="text-gray-600 mb-4">Choose a unique username (no profile picture). Stored securely in GitHub.</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Enter username"
+                  className="flex-1 border border-gray-300 p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  maxLength={20}
+                />
+                <button
+                  onClick={handleRegister}
+                  disabled={loading || !username.trim()}
+                  className="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 disabled:opacity-50"
+                >
+                  Register
+                </button>
+              </div>
+            </section>
+
+            {/* Upload Video */}
+            <section className="bg-white p-6 rounded-lg shadow-md mb-6">
+              <h2 className="text-2xl font-semibold mb-4">Upload Video</h2>
+              <p className="text-gray-600 mb-4">Upload a video (max 20s). Auto-compressed to 360p, AI upscaled on playback.</p>
+              <div className="flex gap-2">
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
+                  className="flex-1 border border-gray-300 p-3 rounded-lg"
+                />
+                <button
+                  onClick={handleVideoUpload}
+                  disabled={loading || !videoFile}
+                  className="bg-green-500 text-white px-6 py-3 rounded-lg hover:bg-green-600 disabled:opacity-50"
+                >
+                  Upload & Compress
+                </button>
+              </div>
+            </section>
+
+            {/* Display Users */}
+            <section className="bg-white p-6 rounded-lg shadow-md mb-6">
+              <h2 className="text-2xl font-semibold mb-4">Users ({users.length})</h2>
+              <ul className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                {users.map((user) => (
+                  <li key={user} className="bg-gray-100 p-2 rounded text-center">{user}</li>
+                ))}
+              </ul>
+            </section>
+
+            {/* Display Videos */}
+            <section className="bg-white p-6 rounded-lg shadow-md">
+              <h2 className="text-2xl font-semibold mb-4">Videos ({videos.length})</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {videos.map((video) => (
+                  <div key={video.name} className="bg-gray-50 p-4 rounded-lg">
+                    <video
+                      src={video.url}
+                      controls
+                      className="w-full rounded mb-2"
+                      onLoadedData={(e) => {
+                        // Placeholder for AI upscaling (e.g., waifu2x-wasm)
+                        console.log("Upscale", video.name);
+                      }}
+                    />
+                    <p className="text-sm text-gray-600 truncate">{video.name}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById("root"));
+  </script>
+</body>
+</html>
